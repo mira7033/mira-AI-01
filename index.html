@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>모바일 객체 인식 및 음성 안내</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        /* 컨테이너에 상하 패딩을 주어 콘텐츠가 화면 가장자리에 붙지 않도록 함 */
+        .container {
+            padding-top: 1rem;
+            padding-bottom: 1rem;
+        }
+        #video-container {
+            position: relative;
+            /* 모바일 화면에 꽉 차도록 너비 100% 설정 */
+            width: 100%;
+            background-color: #000; /* 비디오 로딩 중 검은 배경 */
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        /* 비디오 화면 비율을 유지하기 위한 스타일 (4:3 비율) */
+        #video-container::before {
+            content: "";
+            display: block;
+            padding-top: 75%; /* 4:3 Aspect Ratio */
+        }
+        video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container text-center">
+
+        <h1 class="h3 fw-bold mt-2">객체 인식 및 음성 안내 📷🔊</h1>
+        <p class="mb-3">스마트폰 후면 카메라로 사물을 비춰보세요.</p>
+
+        <div id="status" class="alert alert-info" role="alert">
+            모델을 로딩 중입니다...
+        </div>
+
+        <div id="video-container" class="shadow-sm rounded overflow-hidden mb-3">
+            <video id="webcam" autoplay muted playsinline></video>
+            <canvas id="canvas"></canvas>
+        </div>
+
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@latest/dist/coco-ssd.min.js"></script>
+
+    <script>
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('canvas');
+        const statusDiv = document.getElementById('status');
+        const ctx = canvas.getContext('2d');
+
+        let model = undefined;
+        let previouslyDetected = new Set();
+
+        function speak(text) {
+            if (speechSynthesis.speaking) return;
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'ko-KR';
+            utterance.rate = 1.2;
+            speechSynthesis.speak(utterance);
+        }
+
+        async function setupWebcam() {
+            // --- 모바일 최적화의 핵심 ---
+            // 'facingMode: "environment"'는 스마트폰의 후면 카메라를 사용하도록 요청합니다.
+            const constraints = {
+                video: {
+                    facingMode: 'environment'
+                }
+            };
+            // -------------------------
+
+            return new Promise((resolve, reject) => {
+                navigator.mediaDevices.getUserMedia(constraints)
+                    .then(stream => {
+                        video.srcObject = stream;
+                        video.addEventListener('loadeddata', resolve, false);
+                    })
+                    .catch(error => {
+                        // 후면 카메라 실패 시 전면 카메라로 재시도
+                        console.warn('후면 카메라를 열 수 없습니다. 전면 카메라로 시도합니다.');
+                        navigator.mediaDevices.getUserMedia({ video: true })
+                            .then(stream => {
+                                video.srcObject = stream;
+                                video.addEventListener('loadeddata', resolve, false);
+                            })
+                            .catch(err => reject(err));
+                    });
+            });
+        }
+
+        async function predict() {
+            const predictions = await model.detect(video);
+
+            const videoAspectRatio = video.videoWidth / video.videoHeight;
+            const canvasAspectRatio = canvas.width / canvas.height;
+            const scale = Math.min(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
+            const xOffset = (canvas.width - video.videoWidth * scale) / 2;
+            const yOffset = (canvas.height - video.videoHeight * scale) / 2;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.font = '16px "Noto Sans KR", sans-serif';
+            ctx.textBaseline = 'top';
+
+            const currentDetections = new Set();
+
+            predictions.forEach(prediction => {
+                const objectName = prediction.class;
+                currentDetections.add(objectName);
+
+                if (!previouslyDetected.has(objectName)) {
+                    speak(objectName);
+                }
+                
+                const [x, y, width, height] = prediction.bbox;
+                const label = `${objectName} (${Math.round(prediction.score * 100)}%)`;
+                
+                // 좌표 스케일링
+                const scaledX = x * scale + xOffset;
+                const scaledY = y * scale + yOffset;
+                const scaledWidth = width * scale;
+                const scaledHeight = height * scale;
+
+                ctx.strokeStyle = '#00FFFF';
+                ctx.lineWidth = 2.5;
+                ctx.strokeRect(scaledX, scaledY, scaledWidth, scaledHeight);
+                
+                ctx.fillStyle = '#00FFFF';
+                const textWidth = ctx.measureText(label).width;
+                ctx.fillRect(scaledX, scaledY, textWidth + 8, 22);
+                
+                ctx.fillStyle = '#000000';
+                ctx.fillText(label, scaledX + 4, scaledY + 2);
+            });
+
+            previouslyDetected = currentDetections;
+
+            requestAnimationFrame(predict);
+        }
+        
+        async function run() {
+            try {
+                statusDiv.innerText = '카메라를 시작합니다...';
+                await setupWebcam();
+                statusDiv.innerText = '카메라가 시작되었습니다.';
+                statusDiv.classList.replace('alert-info', 'alert-success');
+            } catch (e) {
+                console.error(e);
+                statusDiv.innerText = '카메라를 시작할 수 없습니다. 권한을 확인해주세요.';
+                statusDiv.classList.replace('alert-info', 'alert-danger');
+                return;
+            }
+
+            statusDiv.innerText = '객체 인식 모델을 로딩합니다...';
+            statusDiv.classList.replace('alert-success', 'alert-info');
+            model = await cocoSsd.load();
+            statusDiv.innerText = '모델 로딩 완료! 인식을 시작합니다.';
+            statusDiv.classList.replace('alert-info', 'alert-success');
+
+            predict();
+        }
+
+        run();
+    </script>
+</body>
+</html>
